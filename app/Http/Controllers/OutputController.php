@@ -3,156 +3,175 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Http;
-use App\Exports\OutputsExport;
+use App\Models\Output;
+use App\Models\Product;
+use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
 
 class OutputController extends Controller {
-    public function index(Request $request) {
-        $baseApiUrl = config('app.backend_api');
-        $apiUrl = $baseApiUrl . '/api/outputs';
-        $apiSearchUrl = $baseApiUrl . '/api/searchOutput';
-        $apiGetCountMonthOutputUrl = $baseApiUrl . '/api/GetCountMonthOutput';
-        $apiGetOutputsCountMonthNumber = $baseApiUrl . '/api/GetOutputsCountMonthNumber';
-        $apiPostBetweenOutput = $baseApiUrl . '/api/PostBetweenOutput';
-    
-        $searchQuery = $request->input('query');
-        $page = $request->input('page', 1);
-        $perPage = 100;
-        $token = $request->session()->get('token');
-    
-        if ($searchQuery) {
-            $apiSearchUrl .= '?search=' . urlencode($searchQuery) . '&page=' . $page . '&per_page=' . $perPage;
-            $response = Http::withToken($token)->get($apiSearchUrl);
-        } else {
-            $apiUrl .= '?page=' . $page . '&per_page=' . $perPage;
-            $response = Http::withToken($token)->get($apiUrl);
-        }
-    
-        if ($response->successful()) {
-            $data = $response->json();
-            if (is_array($data) && array_key_exists('data', $data)) {
-                $outputs = $data['data'];
-                $total = $data['total'] ?? 0;
-                $currentPage = $data['current_page'] ?? 1;
-                $lastPage = $data['last_page'] ?? 1;
-            } else {
-                $outputs = array_slice($data, ($page - 1) * $perPage, $perPage);
-                $total = count($data);
-                $currentPage = $page;
-                $lastPage = ceil($total / $perPage);
-            }
-    
-            $monthCountResponse = Http::withToken($token)->get($apiGetOutputsCountMonthNumber);
-            $monthData = $monthCountResponse->successful() ? $monthCountResponse->json() : ['count' => 0];
-    
-            if ($request->has('download')) {
-                $downloadType = $request->input('download');
-    
-                if ($downloadType === 'pdf') {
-                    $htmlContent = view('outputs.pdf', compact('outputs'))->render();
-                    $htmlFilePath = storage_path('temp/outputs_temp_file.html');
-                    file_put_contents($htmlFilePath, $htmlContent);
-    
-                    if (!file_exists($htmlFilePath)) {
-                        return redirect()->back()->with('error', 'Error al generar el archivo HTML');
-                    }
-    
-                    $pdfFilePath = storage_path('temp/Salidas.pdf');
-                    $command = '"' . env('WKHTMLTOPDF_PATH') . '" --lowquality "file:///' . $htmlFilePath . '" "' . $pdfFilePath . '"';
-    
-                    exec($command, $output, $returnVar);
-    
-                    if ($returnVar === 0) {
-                        return response()->download($pdfFilePath)->deleteFileAfterSend(true);
-                    } else {
-                        return redirect()->back()->with('error', 'Error al generar el PDF');
-                    }
-                } elseif ($downloadType === 'month_pdf') {
-                    $monthResponse = Http::withToken($token)->get($apiGetCountMonthOutputUrl);
-    
-                    if ($monthResponse->successful()) {
-                        $monthData = $monthResponse->json();
-    
-                        $htmlContent = view('outputs.month_pdf', compact('monthData'))->render();
-                        $htmlFilePath = storage_path('temp/outputs_month_temp_file.html');
-                        file_put_contents($htmlFilePath, $htmlContent);
-    
-                        if (!file_exists($htmlFilePath)) {
-                            return redirect()->back()->with('error', 'Error al generar el archivo HTML');
-                        }
-    
-                        $pdfFilePath = storage_path('temp/Salidas_Mes.pdf');
-                        $command = '"' . env('WKHTMLTOPDF_PATH') . '" --lowquality "file:///' . $htmlFilePath . '" "' . $pdfFilePath . '"';
-    
-                        exec($command, $output, $returnVar);
-    
-                        if ($returnVar === 0) {
-                            return response()->download($pdfFilePath)->deleteFileAfterSend(true);
-                        } else {
-                            return redirect()->back()->with('error', 'Error al generar el PDF');
-                        }
-                    } else {
-                        return redirect()->back()->with('error', 'Error al obtener las salidas del mes de la API');
-                    }
-                } elseif ($downloadType === 'between_dates_pdf') {
-                    $start_date = $request->input('start_date');
-                    $end_date = $request->input('end_date');
-    
-                    $dateRangeResponse = Http::withToken($token)->post($apiPostBetweenOutput, [
-                        'start_date' => $start_date,
-                        'end_date' => $end_date
-                    ]);
-    
-                    if ($dateRangeResponse->successful()) {
-                        $dateRangeData = $dateRangeResponse->json();
-    
-                        $htmlContent = view('outputs.between_dates_pdf', compact('dateRangeData'))->render();
-                        $htmlFilePath = storage_path('temp/outputs_between_dates_temp_file.html');
-                        file_put_contents($htmlFilePath, $htmlContent);
-    
-                        if (!file_exists($htmlFilePath)) {
-                            return redirect()->back()->with('error', 'Error al generar el archivo HTML');
-                        }
-    
-                        $pdfFilePath = storage_path('temp/Salidas_Rango_Seleccionado.pdf');
-                        $command = '"' . env('WKHTMLTOPDF_PATH') . '" --lowquality "file:///' . $htmlFilePath . '" "' . $pdfFilePath . '"';
-    
-                        exec($command, $output, $returnVar);
-    
-                        if ($returnVar === 0) {
-                            return response()->download($pdfFilePath)->deleteFileAfterSend(true);
-                        } else {
-                            return redirect()->back()->with('error', 'Error al generar el PDF');
-                        }
-                    } else {
-                        return redirect()->back()->with('error', 'Error al obtener las salidas del rango de fechas de la API');
-                    }
-                } elseif ($downloadType === 'between_dates_excel') {
-                    $start_date = $request->input('start_date');
-                    $end_date = $request->input('end_date');
-    
-                    $dateRangeResponse = Http::withToken($token)->post($apiPostBetweenOutput, [
-                        'start_date' => $start_date,
-                        'end_date' => $end_date
-                    ]);
-    
-                    if ($dateRangeResponse->successful()) {
-                        $dateRangeData = $dateRangeResponse->json();
-    
-                        $filePath = storage_path('app/Salidas_Rango_Seleccionado.xlsx');
-                        $export = new OutputsExport($dateRangeData);
-                        $export->export($filePath);
-    
-                        return response()->download($filePath)->deleteFileAfterSend(true);
-                    } else {
-                        return redirect()->back()->with('error', 'Error al obtener las salidas del rango de fechas de la API');
-                    }
-                }
-            }
-    
-            return view('outputs.index', compact('outputs', 'searchQuery', 'total', 'currentPage', 'lastPage', 'monthData'));
-        }
-    
-        return redirect()->back()->with('error', 'Error al obtener las salidas de la API');
+    // GET all outputs
+    public function index() {
+        $outputs = Output::with(['project', 'product','user'])->latest()->get();
+        return response()->json($outputs);
     }
-}    
+
+    // GET the total number of outputs
+    public function GetCountMonthOutput() {
+        $outputs = Output::with(['product'])
+            ->whereMonth('created_at', now()->month)
+            ->latest()
+            ->get();
+        return response()->json($outputs);
+    }
+
+    public function GetProductOutput() {
+        // Obtener el producto con la mayor cantidad de salidas (sumando las cantidades)
+        $productWithMostOutput = DB::table('outputs')
+            ->select('product_id', DB::raw('SUM(quantity) as total_quantity'))
+            ->groupBy('product_id')
+            ->orderBy('total_quantity', 'desc')
+            ->first();
+    
+        // Verificar si se encontró algún producto
+        if ($productWithMostOutput) {
+            $product = Product::find($productWithMostOutput->product_id);
+            return response()->json([
+                'product' => $product,
+                'name' => $product->name,
+                'total_quantity' => number_format($productWithMostOutput->total_quantity, 0,  '.', ',')
+            ], 200);
+        } else {
+            return response()->json(['message' => 'No products found'], 404);
+        }
+    }
+
+    // GET the total number of outputs
+    public function GetOutputsCount() {
+        // Obtener la cantidad total de salidas
+        $outputsCount = Output::count();
+
+        return response()->json(['count' => $outputsCount], 200);
+    }
+    
+    // GET the total number of outputs of the current month
+    public function GetOutputsCountMonthNumber() {
+        // Obtener la cantidad total de salidas del mes actual
+        $outputsCount = Output::whereMonth('created_at', now()->month)->count();
+
+        return response()->json(['count' => $outputsCount], 200);
+    }
+
+      
+    public function PostBetweenOutput(Request $request) {
+        $start_date = Carbon::createFromFormat('d/m/Y', $request->input('start_date'))->startOfDay();
+        $end_date = Carbon::createFromFormat('d/m/Y', $request->input('end_date'))->endOfDay();
+    
+        $outputs = Output::with(['project', 'product', 'user'])
+            ->whereBetween('created_at', [$start_date, $end_date])
+            ->orderBy('created_at', 'asc') // Cambia a orden ascendente
+            ->get();
+    
+        return response()->json($outputs);
+    }
+    
+
+    public function SearchOutput(Request $request) {
+        // Obtener el parámetro de búsqueda desde la solicitud
+        $search = $request->input('search');
+    
+        // Crear la consulta base con las relaciones
+        $query = Output::with(['project', 'product', 'user'])
+            ->leftJoin('projects', 'outputs.project_id', '=', 'projects.id')
+            ->leftJoin('products', 'outputs.product_id', '=', 'products.id')
+            ->leftJoin('users', 'outputs.user_id', '=', 'users.id')
+            ->select('outputs.*');
+    
+        // Si el parámetro de búsqueda está presente, filtrar las salidas
+        if ($search) {
+            $query->selectRaw("
+                (CASE WHEN outputs.responsible LIKE ? THEN 1 ELSE 0 END +
+                CASE WHEN outputs.quantity LIKE ? THEN 1 ELSE 0 END +
+                CASE WHEN outputs.description LIKE ? THEN 1 ELSE 0 END +
+                CASE WHEN outputs.created_at LIKE ? THEN 1 ELSE 0 END +
+                CASE WHEN projects.name LIKE ? THEN 1 ELSE 0 END +
+                CASE WHEN products.name LIKE ? THEN 1 ELSE 0 END +
+                CASE WHEN users.name LIKE ? THEN 1 ELSE 0 END +
+                CASE WHEN products.location LIKE ? THEN 1 ELSE 0 END +
+                CASE WHEN outputs.project_id LIKE ? THEN 1 ELSE 0 END +
+                CASE WHEN outputs.product_id LIKE ? THEN 1 ELSE 0 END +
+                CASE WHEN outputs.user_id LIKE ? THEN 1 ELSE 0 END
+                ) as relevance_score",
+                array_fill(0, 11, "%{$search}%")
+            )
+            ->having('relevance_score', '>', 0)
+            ->orderBy('relevance_score', 'desc');
+    
+            $query->where(function ($q) use ($search) {
+                $q->where('outputs.responsible', 'like', "%{$search}%")
+                    ->orWhere('outputs.quantity', 'like', "%{$search}%")
+                    ->orWhere('outputs.description', 'like', "%{$search}%")
+                    ->orWhere('outputs.created_at', 'like', "%{$search}%")
+                    ->orWhere('projects.name', 'like', "%{$search}%")
+                    ->orWhere('products.name', 'like', "%{$search}%")
+                    ->orWhere('users.name', 'like', "%{$search}%")
+                    ->orWhere('products.location', 'like', "%{$search}%")
+                    ->orWhere('outputs.project_id', 'like', "%{$search}%")
+                    ->orWhere('outputs.product_id', 'like', "%{$search}%")
+                    ->orWhere('outputs.user_id', 'like', "%{$search}%");
+            });
+        }
+    
+        // Ejecutar la consulta
+        $outputs = $query->get();
+    
+        return response()->json($outputs);
+    }    
+
+
+
+    // GET a single output by id
+    public function show($id) {
+        $output = Output::with(['project', 'product','user'])->find($id);
+        if (!$output) {
+            return response()->json(['message' => 'Output not found'], 404);
+        }
+        return response()->json($output);
+    }
+
+    // POST a new output
+    public function store(Request $request) {
+        $request->validate([
+            'project_id' => 'nullable|exists:projects,id',
+            'product_id' => 'required|exists:products,id',
+            'user_id' => 'nullable|exists:users,id',
+            'responsible' => 'required|string|max:100',
+            'quantity' => 'required|integer|min:1',
+            'description' => 'nullable|string|max:100',
+            'product_id' => 'required|exists:products,id',
+        ]);
+
+        // Buscar el producto
+        $product = Product::findOrFail($request->product_id);
+
+        // Verificar si hay suficiente cantidad disponible
+        if ($product->quantity < $request->quantity) {
+            return response()->json(['error' => 'No hay suficiente cantidad disponible. Cantidad disponible: ' . number_format($product->quantity, 0, '.', ',')], 400);
+        }
+
+        // Deducción de la cantidad en la tabla de productos
+        $product->quantity -= $request->quantity;
+        $product->save();
+
+        // Crear la salida en la tabla de salidas
+        $outputData = $request->only(['project_id', 'product_id', 'responsible', 'quantity', 'description', 'user_id']);
+
+        // Eliminar el campo 'project_id' si está vacío o nulo
+        if (empty($outputData['project_id'])) {
+            $outputData['project_id'] = null;
+        }
+
+        $output = Output::create($outputData);
+
+        return response()->json($output, 201);
+    }
+}

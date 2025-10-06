@@ -2,341 +2,178 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Product;
+use App\Models\Category; // Import the Category model
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Http;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Storage;
-use GuzzleHttp\Client;
-use Barryvdh\Snappy\Facades\SnappyPdf as PDF;
-use App\Exports\ProductsExport;
+use Illuminate\Support\Facades\File;
+use App\Models\Supplier; // Import the Supplier model
+use App\Models\Project; // Import the Project model
+use Exception;
+use Illuminate\Support\Facades\DB;
 
 class ProductController extends Controller {
-
-    public function index(Request $request)
-    {
-        // URL base de la API de productos
-        $baseApiUrl = config('app.backend_api');
-        $apiUrl = $baseApiUrl . '/api/products';
-        $searchQuery = $request->input('query');
-    
-        // Parámetros de paginación
-        $page = $request->input('page', 1);
-        $perPage = 100;
-    
-        // Define la URL de búsqueda en la API
-        $apiSearchUrl = $baseApiUrl . '/api/search';
-    
-        // Obtener el token de la sesión
-        $token = $request->session()->get('token');
-    
-        // Si hay una consulta de búsqueda, agrega el parámetro de búsqueda a la URL de la API de búsqueda
-        if ($searchQuery) {
-            $apiSearchUrl .= '?search=' . urlencode($searchQuery) . '&page=' . $page . '&per_page=' . $perPage;
-            $response = Http::withToken($token)->get($apiSearchUrl);
-        } else {
-            $apiUrl .= '?page=' . $page . '&per_page=' . $perPage;
-            $response = Http::withToken($token)->get($apiUrl);
-        }
-    
-        // Verifica si la solicitud fue exitosa
-        if ($response->successful()) {
-            $data = $response->json();
-    
-            if (is_array($data) && array_key_exists('data', $data)) {
-                $products = $data['data'];
-                $total = $data['total'] ?? 0;
-                $currentPage = $data['current_page'] ?? 1;
-                $lastPage = $data['last_page'] ?? 1;
-            } else {
-                $products = array_slice($data, ($page - 1) * $perPage, $perPage);
-                $total = count($data);
-                $currentPage = $page;
-                $lastPage = ceil($total / $perPage);
-            }
-    
-            if ($request->has('download')) {
-                $downloadType = $request->input('download');
-                if ($downloadType === 'pdf') {
-                    // Guardar HTML en un archivo temporal en una ubicación accesible
-                    $htmlContent = view('products.pdf', compact('products'))->render();
-                    $htmlFilePath = storage_path('temp/my_temp_file.html');
-                    file_put_contents($htmlFilePath, $htmlContent);
-    
-                    // Verificar si el archivo HTML se genera correctamente
-                    if (!file_exists($htmlFilePath)) {
-                        return redirect()->back()->with('error', 'Error al generar el archivo HTML');
-                    }
-    
-                    // Definir la ruta de salida del PDF
-                    $pdfFilePath = storage_path('temp/Inventario.pdf');
-                    $command = '"' . env('WKHTMLTOPDF_PATH') . '" --lowquality "file:///' . $htmlFilePath . '" "' . $pdfFilePath . '"';
-    
-                    // Ejecutar el comando
-                    exec($command, $output, $returnVar);
-    
-                    // Verificar si el PDF se generó correctamente
-                    if ($returnVar === 0) {
-                        return response()->download($pdfFilePath)->deleteFileAfterSend(true);
-                    } else {
-                        return redirect()->back()->with('error', 'Error al generar el PDF');
-                    }
-                } elseif ($downloadType === 'excel') {
-                    $filePath = storage_path('temp/Inventario.xlsx');
-                    $export = new ProductsExport($products);
-                    $export->export($filePath);
-                    return response()->download($filePath)->deleteFileAfterSend(true);
-                }
-            }
-    
-            return view('products.index', compact('products', 'searchQuery', 'total', 'currentPage', 'lastPage'));
-        }
-    
-        return redirect()->back()->with('error', 'Error al obtener los productos de la API');
-    }
-    
-
-    public function show($id, Request $request) {
-        // URL base de la API
-        $baseApiUrl = config('app.backend_api');
-
-        // URL de la API para obtener un producto específico
-        $productApiUrl = $baseApiUrl . '/api/products/' . $id;
-
-        // URL de la API para obtener todos los proyectos
-        $projectsApiUrl = $baseApiUrl . '/api/getprojects';
-
-        // Obtener el token de la sesión
-        $token = $request->session()->get('token');
-
-        // Realiza una solicitud HTTP GET a la API para obtener los datos del producto
-        $productResponse = Http::withToken($token)->get($productApiUrl);
-
-        // Realiza una solicitud HTTP GET a la API para obtener los datos de los proyectos
-        $projectsResponse = Http::withToken($token)->get($projectsApiUrl);
-
-        if ($productResponse->successful() && $projectsResponse->successful()) {
-            // Decodifica la respuesta JSON del producto en un array asociativo
-            $product = $productResponse->json();
-
-            // Decodifica la respuesta JSON de los proyectos en un array asociativo
-            $projects = $projectsResponse->json();
-
-            // Muestra la vista de detalles del producto con los datos del producto y los proyectos
-            return view('products.show', compact('product', 'projects'));
-        }
-
-        // En caso de error en alguna solicitud, redirige a una vista de error o de no encontrado
-        return abort(404, 'Product or projects data not found.');
+    /**
+     * Devuelve todos los productos.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function index() {
+        $products = Product::with(['category', 'Supplier'])
+            ->withCount(['loans' => function($query) {
+                $query->where('status', 1); // Solo préstamos activos
+            }])
+            ->latest()
+            ->get();
+        return response()->json($products, 200);
     }
 
-    public function storeEntrance(Request $request) {
-        // Validar los datos de la solicitud
-        $validatedData = $request->validate([
-            'project_id' => 'nullable|integer',
-            'product_id' => 'required|integer',
-            'user_id' => 'required|integer',
-            'responsible' => 'required|string|max:100',
-            'quantity' => 'required|integer',
-            'description' => 'nullable|string|max:100',
-            'folio' => 'nullable|string|max:100', 
-
-        ]);
-
-        // URL base de la API
-        $baseApiUrl = config('app.backend_api');
-
-        // URL de tu segunda API para almacenar datos
-        $apiUrl = $baseApiUrl . '/api/entrances';
-
-        // Obtener el token de la sesión
-        $token = $request->session()->get('token');
-
-        // Realizar una solicitud HTTP POST a tu segunda API con los datos validados del formulario
-        $response = Http::withToken($token)->post($apiUrl, $validatedData);
-        // dd($validatedData);
-
-        // Verificar si la solicitud fue exitosa
-        if ($response->successful()) {
-            // Redirigir a una vista con un mensaje de éxito
-            return redirect()->route('products.index')->with('success', 'Entrada creada exitosamente.');
-        }
-
-        // Manejar errores de la API
-        $error = $response->json('error', 'Ocurrió un error desconocido.');
-
-        return redirect()->back()->withErrors(['quantity' => $error])->withInput();
+    // conteo de productos
+    public function getCountProducts() {
+        $count = Product::count();
+        $formattedCount = number_format($count, 0, '.', ',');
+        return response()->json(['count' => $formattedCount], 200);
     }
 
-    public function storeOutputs(Request $request) {
-        // Validar los datos de la solicitud
-        $validatedData = $request->validate([
-            'project_id' => 'nullable|integer',
-            'product_id' => 'nullable|integer',
-            'user_id' => 'required|integer',
-            'responsible' => 'required|string|max:100',
-            'quantity' => 'required|integer',
-            'description' => 'nullable|string|max:100',
-        ]);
+    // GET de categorias y proveedores
 
-        // URL base de la API
-        $baseApiUrl = config('app.backend_api');
+    public function getCategoryProducts() {
+        $categories = Category::orderBy('name')->get();
+        $suppliers = Supplier::orderBy('company')->get();
 
-        // URL de tu segunda API para almacenar datos
-        $apiUrl = $baseApiUrl . '/api/outputs';
-
-        // Obtener el token de la sesión
-        $token = $request->session()->get('token');
-
-        // Realizar una solicitud HTTP POST a tu segunda API con los datos validados del formulario
-        $response = Http::withToken($token)->post($apiUrl, $validatedData);
-
-        // Verificar si la solicitud fue exitosa
-        if ($response->successful()) {
-            // Redirigir a una vista con un mensaje de éxito
-            return redirect()->route('products.index')->with('success', 'Salida creada exitosamente.');
-        }
-
-        // Manejar errores de la API
-        $error = $response->json('error', 'Ocurrió un error desconocido.');
-
-        return redirect()->back()->withErrors(['quantity' => $error])->withInput();
+        return response()->json([
+            'categories' => $categories,
+            'suppliers' => $suppliers
+        ], 200);
     }
 
-    public function storeLoans(Request $request) {
-        // Validar los datos de la solicitud
-        $validatedData = $request->validate([
-            'product_id' => 'required|integer',
-            'project_id' => 'nullable|integer',
-            'user_id' => 'required|integer',
-            'responsible' => 'required|string|max:100',
-            'quantity' => 'required|integer',
-            'observations' => 'nullable|string|max:255',
-        ]);
+    // GET de proyectos
+    public function getprojects() {
+        $projects = Project::orderBy('name')->get();
 
-        // URL base de la API
-        $baseApiUrl = config('app.backend_api');
-
-        // URL de tu segunda API para almacenar datos
-        $apiUrl = $baseApiUrl . '/api/loans';
-
-        // Obtener el token de la sesión
-        $token = $request->session()->get('token');
-    
-        // dd($validatedData);
-
-
-        // Realizar una solicitud HTTP POST a tu segunda API con los datos validados del formulario
-        $response = Http::withToken($token)->post($apiUrl, $validatedData);
-
-        // Verificar si la solicitud fue exitosa
-        if ($response->successful()) {
-            // Redirigir a una vista con un mensaje de éxito
-            return redirect()->route('products.index')->with('success', 'Préstamo creado exitosamente.');
-        }
-
-        // Manejar errores de la API
-        $error = $response->json('error', 'Ocurrió un error desconocido.');
-
-        return redirect()->back()->withErrors(['quantity' => $error])->withInput();
+        return response()->json($projects, 200);
     }
 
-    public function loansGet($id, Request $request) {
-        // URL base de la API
-        $baseApiUrl = config('app.backend_api');
-    
-        // URL de la API para obtener un producto específico
-        $productApiUrl = $baseApiUrl . '/api/products/' . $id;
-    
-        // URL de la API para obtener todos los proyectos
-        $projectsApiUrl = $baseApiUrl . '/api/getprojects';
-    
-        // Obtener el token de la sesión
-        $token = $request->session()->get('token');
-    
-        // Realiza una solicitud HTTP GET a la API para obtener los datos del producto
-        $productResponse = Http::withToken($token)->get($productApiUrl);
-    
-        // Realiza una solicitud HTTP GET a la API para obtener los datos de los proyectos
-        $projectsResponse = Http::withToken($token)->get($projectsApiUrl);
-    
-        if ($productResponse->successful() && $projectsResponse->successful()) {
-            // Decodifica la respuesta JSON del producto en un array asociativo
-            $product = $productResponse->json();
-    
-            // Decodifica la respuesta JSON de los proyectos en un array asociativo
-            $projects = $projectsResponse->json();
-    
-            // Muestra la vista de detalles del producto con los datos del producto y los proyectos
-            return view('products.loans', compact('product', 'projects'));
-        }
-    
-        // En caso de error en alguna solicitud, redirige a una vista de error o de no encontrado
-        return abort(404, 'Product or projects data not found.');
-    }
-    
-    public function outPutGet($id, Request $request) {
-        // URL base de la API
-        $baseApiUrl = config('app.backend_api');
+    public function SearchGet(Request $request) {
+        // Obtener el parámetro de búsqueda desde la solicitud
+        $search = $request->input('search');
+        $categories = Category::orderBy('id')->get();
+        $suppliers = Supplier::orderBy('id')->get();
 
-        // URL de la API para obtener un producto específico
-        $productApiUrl = $baseApiUrl . '/api/products/' . $id;
+        // Crear la consulta base con las relaciones
+        $query = Product::with(['category', 'supplier'])
+            ->withCount(['loans' => function($query) {
+                $query->where('status', 1); // Solo préstamos activos
+            }])
+            ->leftJoin('categories', 'products.category_id', '=', 'categories.id')
+            ->leftJoin('suppliers', 'products.supplier_id', '=', 'suppliers.id')
+            ->select('products.*');
 
-        // URL de la API para obtener todos los proyectos
-        $projectsApiUrl = $baseApiUrl . '/api/getprojects';
-
-        // Obtener el token de la sesión
-        $token = $request->session()->get('token');
-
-        // Realiza una solicitud HTTP GET a la API para obtener los datos del producto
-        $productResponse = Http::withToken($token)->get($productApiUrl);
-
-        // Realiza una solicitud HTTP GET a la API para obtener los datos de los proyectos
-        $projectsResponse = Http::withToken($token)->get($projectsApiUrl);
-
-        if ($productResponse->successful() && $projectsResponse->successful()) {
-            // Decodifica la respuesta JSON del producto en un array asociativo
-            $product = $productResponse->json();
-
-            // Decodifica la respuesta JSON de los proyectos en un array asociativo
-            $projects = $projectsResponse->json();
-
-            // Muestra la vista de detalles del producto con los datos del producto y los proyectos
-            return view('products.output', compact('product', 'projects'));
+        // Si el parámetro de búsqueda está presente, filtrar los productos
+        if ($search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('products.name', 'LIKE', "%$search%")
+                    ->orWhere('products.category_id', 'LIKE', "%$search%")
+                    ->orWhere('products.price', 'LIKE', "%$search%")
+                    ->orWhere('products.location', 'LIKE', "%$search%")
+                    ->orWhere('products.description', 'LIKE', "%$search%")
+                    ->orWhere('products.observations', 'LIKE', "%$search%")
+                    ->orWhere('products.quantity', 'LIKE', "%$search%")
+                    ->orWhere('categories.name', 'LIKE', "%$search%")
+                    ->orWhere('suppliers.company', 'LIKE', "%$search%");
+            });
         }
 
-        // En caso de error en alguna solicitud, redirige a una vista de error o de no encontrado
-        return abort(404, 'Product or projects data not found.');
+        // Ejecutar la consulta y ordenar por la fecha de creación
+        $products = $query->latest('products.created_at')->get();
+
+        return response()->json($products, 200);
     }
 
-
-
-    public function create(Request $request) {
-        // URL base de la API
-        $baseApiUrl = config('app.backend_api');
-
-        // URL de la API para obtener categorías y proveedores
-        $apiUrl = $baseApiUrl . '/api/getCategoryProducts';
-
-        // Obtener el token de la sesión
-        $token = $request->session()->get('token');
-
-        // Realizar una solicitud HTTP GET a la API
-        $response = Http::withToken($token)->get($apiUrl)->json();
-
-        $suppliers = $response['suppliers'];
-        $categories = $response['categories'];
-
-        // Verificar el rol del usuario desde la sesión
-        $userRole = $request->session()->get('role');
-        if ($userRole == 2) {
-            return redirect()->back()->with('error', 'You are not authorized to perform this action.');
-        }
-
-        return view('products.create', compact('suppliers', 'categories'));
-    }
-
+    /**
+     * Crea un nuevo producto.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
     public function store(Request $request) {
-        // Validar los datos de la solicitud
-        $validatedData = $request->validate([
+        // Validar los datos de entrada
+        try {
+            $validated = $request->validate([
+                'name' => 'required|string|max:50',
+                'model' => 'nullable|string|max:50',
+                'measurement_unit' => 'nullable|string|max:15',
+                'brand' => 'nullable|string|max:50',
+                'quantity' => 'required|integer',
+                'description' => 'nullable|string',
+                'price' => 'required|numeric|between:0,999999.99',
+                'profile_image' => 'nullable|file|max:2048|mimes:jpeg,png,gif,svg',
+                'serie' => 'nullable|string|max:40',
+                'observations' => 'nullable|string|max:50',
+                'location' => 'nullable|string|max:20',
+                'category_id' => 'required|exists:categories,id',
+                'supplier_id' => 'nullable|exists:suppliers,id',
+            ]);
+
+            // Comprobar si la solicitud contiene una imagen
+            if ($request->hasFile('profile_image')) {
+                $file = $request->file('profile_image');
+                $extension = $file->getClientOriginalExtension();
+                $new_name = time() . '_1.' . $extension;
+
+                // Mover la nueva imagen a la carpeta public/images
+                $file->move(public_path('images'), $new_name);
+
+                // Ruta completa de la nueva imagen
+                $imagePath = 'images/' . $new_name;
+
+                // Asignar la ruta de la nueva imagen al campo profile_image
+                $validated['profile_image'] = $imagePath;
+            }
+
+            // Crear un nuevo producto con los datos validados
+            $product = Product::create($validated);
+
+            // Devolver una respuesta JSON con el producto creado
+            return response()->json($product, 201);
+        } catch (\Exception $e) {
+            return response()->json(['error' => $e->getMessage()], 400);
+        }
+    }
+    /**
+     * Devuelve un producto específico según su ID.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
+
+
+    public function show($id) {
+        $product = Product::withCount(['loans' => function($query) {
+            $query->where('status', 1); // Solo préstamos activos
+        }])->find($id);
+        if (!$product) {
+            return response()->json(['error' => 'Producto no encontrado'], 404);
+        }
+        return response()->json($product, 200);
+    }
+
+    /**
+     * Actualiza un producto existente según su ID.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
+
+
+    public function update(Request $request, $id) {
+        // Buscar el producto a actualizar
+        $product = Product::findOrFail($id);
+
+        // Validar los datos de entrada
+        $validated = $request->validate([
             'name' => 'required|string|max:50',
             'model' => 'nullable|string|max:50',
             'measurement_unit' => 'nullable|string|max:15',
@@ -348,238 +185,74 @@ class ProductController extends Controller {
             'serie' => 'nullable|string|max:40',
             'observations' => 'nullable|string|max:50',
             'location' => 'nullable|string|max:20',
-            'category_id' => 'required|integer',
-            'supplier_id' => 'nullable|integer',
+            'category_id' => 'required|exists:categories,id',
+            'supplier_id' => 'nullable|exists:suppliers,id',
         ]);
-
-        // URL base de la API
-        $baseApiUrl = config('app.backend_api');
-
-        // URL de tu API para almacenar productos
-        $apiUrl = $baseApiUrl . '/api/products';
-
-        // Obtener el token de la sesión
-        $token = $request->session()->get('token');
-
-        // Verificar si la solicitud contiene una imagen
-        if ($request->hasFile('profile_image')) {
-            $file = $request->file('profile_image');
-            $imageContents = file_get_contents($file->getPathname());
-            $imageName = $file->getClientOriginalName();
-
-            // Realizar una solicitud HTTP POST a tu API con los datos validados del formulario
-            $response = Http::withToken($token)->attach(
-                'profile_image',
-                $imageContents,
-                $imageName
-            )->post($apiUrl, $validatedData);
-        } else {
-            // Si no hay imagen adjunta, elimina el campo de imagen de los datos validados
-            unset($validatedData['profile_image']);
-
-            // Realizar una solicitud HTTP POST a tu API sin el campo de imagen
-            $response = Http::withToken($token)->post($apiUrl, $validatedData);
-        }
-
-        // Verificar si la solicitud fue exitosa
-        if ($response->successful()) {
-            // Redirigir a una página de éxito o mostrar un mensaje de éxito
-            return redirect()->route('products.index')->with('success', 'Producto creado exitosamente.');
-        } else {
-            // Manejar errores si la solicitud no fue exitosa
-            return back()->withInput()->withErrors('Error al crear el producto. Por favor, inténtalo de nuevo más tarde.');
-        }
-    }
-
-    public function edit($id, Request $request) {
-        // Verificar el rol del usuario desde la sesión
-        $userRole = $request->session()->get('role');
-
-        if ($userRole == 2) {
-            return redirect()->back()->with('error', 'You are not authorized to perform this action.');
-        }
-
-        // URL base de la API
-        $baseApiUrl = config('app.backend_api');
-
-        // URL de la API para obtener categorías y proveedores
-        $apiUrl = $baseApiUrl . '/api/getCategoryProducts';
-
-        // Obtener el token de la sesión
-        $token = $request->session()->get('token');
-
-        // Realizar una solicitud HTTP GET a la API
-        $response = Http::withToken($token)->get($apiUrl)->json();
-
-        $suppliers = $response['suppliers'];
-        $categories = $response['categories'];
-
-        // URL de la API para obtener un producto específico
-        $productApiUrl = $baseApiUrl . '/api/products/' . $id;
-
-        // Realiza una solicitud HTTP GET a la API para obtener los datos del producto
-        $productResponse = Http::withToken($token)->get($productApiUrl);
-
-        // Verifica si la solicitud fue exitosa
-        if ($productResponse->successful()) {
-            // Decodifica la respuesta JSON en un array asociativo
-            $product = $productResponse->json();
-
-            // Muestra el formulario de edición con los datos del producto
-            return view('products.edit', compact('product', 'suppliers', 'categories'));
-        }
-
-        // Manejar errores si la solicitud no fue exitosa
-        return back()->withErrors('Error al obtener los datos del producto. Por favor, inténtalo de nuevo más tarde.');
-    }
-
-
-    public function update(Request $request, $id) {
-        // Validar los datos de la solicitud
-        $validatedData = $request->validate([
-            'name' => 'required|string|max:50',
-            'model' => 'nullable|string|max:50',
-            'measurement_unit' => 'nullable|string|max:15',
-            'brand' => 'nullable|string|max:50',
-            'quantity' => 'required|integer',
-            'description' => 'nullable|string',
-            'price' => 'required|numeric|between:0,999999.99',
-            'profile_image' => 'nullable|file|max:2048|mimes:jpeg,png,gif,svg',
-            'serie' => 'nullable|string|max:40',
-            'observations' => 'nullable|string|max:50',
-            'location' => 'nullable|string|max:100',
-            'category_id' => 'required|integer',
-            'supplier_id' => 'nullable|integer',
-        ]);
-
-        // Configurar los datos del formulario
-        $formParams = [
-            [
-                'name' => '_method',
-                'contents' => 'PUT',
-            ],
-            [
-                'name' => 'name',
-                'contents' => $validatedData['name'],
-            ],
-            [
-                'name' => 'model',
-                'contents' => $validatedData['model'] ?? null,
-            ],
-            [
-                'name' => 'measurement_unit',
-                'contents' => $validatedData['measurement_unit'] ?? null,
-            ],
-            [
-                'name' => 'brand',
-                'contents' => $validatedData['brand'] ?? null,
-            ],
-            [
-                'name' => 'quantity',
-                'contents' => $validatedData['quantity'],
-            ],
-            [
-                'name' => 'description',
-                'contents' => $validatedData['description'] ?? null,
-            ],
-            [
-                'name' => 'price',
-                'contents' => $validatedData['price'],
-            ],
-            [
-                'name' => 'serie',
-                'contents' => $validatedData['serie'] ?? null,
-            ],
-            [
-                'name' => 'observations',
-                'contents' => $validatedData['observations'] ?? null,
-            ],
-            [
-                'name' => 'location',
-                'contents' => $validatedData['location'] ?? null,
-            ],
-            [
-                'name' => 'category_id',
-                'contents' => $validatedData['category_id'],
-            ],
-            [
-                'name' => 'supplier_id',
-                'contents' => $validatedData['supplier_id'] ?? null,
-            ],
-        ];
-
 
         // Comprobar si la solicitud contiene una imagen
         if ($request->hasFile('profile_image')) {
+            // Eliminar la imagen anterior si existe
+            if (File::exists(public_path($product->profile_image))) {
+                File::delete(public_path($product->profile_image));
+            }
+
             // Procesar la nueva imagen
             $file = $request->file('profile_image');
-            $filePath = $file->getPathname();
-            $fileName = $file->getClientOriginalName();
+            $extension = $file->getClientOriginalExtension();
+            $new_name = time() . '_1.' . $extension;
 
-            $formParams[] = [
-                'name' => 'profile_image',
-                'contents' => fopen($filePath, 'r'),
-                'filename' => $fileName,
-            ];
+            // Mover la nueva imagen a la carpeta public/images
+            $file->move(public_path('images'), $new_name);
+
+            // Ruta completa de la nueva imagen
+            $imagePath = 'images/' . $new_name;
+
+            // Asignar la ruta de la nueva imagen al campo profile_image
+            $validated['profile_image'] = $imagePath;
         }
 
-        // URL base de la API
-        $baseApiUrl = config('app.backend_api');
+        // Actualizar el producto con los datos validados
+        $product->update($validated);
 
-        // URL de la API para actualizar un producto específico
-        $apiUrl = $baseApiUrl . '/api/products/' . $id;
+        // Devolver una respuesta JSON con el producto actualizado
+        return response()->json($product, 200);
+    }
+    /**
+     * Elimina un producto existente según su ID.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
 
-        // Obtener el token de la sesión
-        $token = $request->session()->get('token');
-
-        // Crear un cliente Guzzle
-        $client = new Client();
-
-        // Realizar una solicitud HTTP POST con _method=PUT para actualizar el producto
+     public function destroy($id) {
+        $product = Product::find($id);
+        if (!$product) {
+            return response()->json(['error' => 'Producto no encontrado'], 404);
+        }
+    
+        DB::beginTransaction();
+    
         try {
-            $response = $client->post($apiUrl, [
-                'headers' => [
-                    'Authorization' => 'Bearer ' . $token,
-                    'Accept' => 'application/json',
-                ],
-                'multipart' => $formParams,
-            ]);
-
-            // Verificar si la solicitud fue exitosa
-            if ($response->getStatusCode() == 200) {
-                // Redirigir a una página de éxito o mostrar un mensaje de éxito
-                return redirect()->route('products.index')->with('success', 'Producto actualizado exitosamente.');
-            } else {
-                // Manejar errores si la solicitud no fue exitosa
-                return back()->withInput()->withErrors('Error al actualizar el producto. Por favor, inténtalo de nuevo más tarde.');
+            // Elimina el producto primero
+            $product->delete();
+    
+            // Intenta eliminar la imagen si existe
+            if ($product->profile_image) {
+                $imagePath = public_path($product->profile_image);
+                if (File::exists($imagePath)) {
+                    if (!File::delete($imagePath)) {
+                        // Si la imagen no se puede eliminar, lanza una excepción
+                        throw new Exception('No se pudo eliminar la imagen');
+                    }
+                }
             }
-        } catch (\Exception $e) {
-            return back()->withInput()->withErrors('Error al actualizar el producto: ' . $e->getMessage());
+    
+            DB::commit();
+            return response()->json(['message' => 'Producto eliminado exitosamente'], 200);
+        } catch (Exception $e) {
+            DB::rollBack();
+            return response()->json(['error' => $e->getMessage()], 500);
         }
     }
-
-
-
-    public function destroy($id, Request $request) {
-        // URL base de la API
-        $baseApiUrl = config('app.backend_api');
-
-        // URL de la API para eliminar un producto específico
-        $apiUrl = $baseApiUrl . '/api/products/' . $id;
-
-        // Obtener el token de la sesión
-        $token = $request->session()->get('token');
-
-        // Realizar una solicitud HTTP DELETE a la API
-        $response = Http::withToken($token)->delete($apiUrl);
-
-        // Verificar si la solicitud fue exitosa
-        if ($response->successful()) {
-            // Redirigir a una página de éxito o mostrar un mensaje de éxito
-            return redirect()->route('products.index')->with('success', 'Producto eliminado exitosamente.');
-        } else {
-            // Si la solicitud no fue exitosa, redirigir de vuelta con un mensaje de error
-            return redirect()->back()->with('error', 'No se pudo eliminar el producto. Porque tiene entradas, salidas o préstamos.');
-        }
-    }
+    
 }

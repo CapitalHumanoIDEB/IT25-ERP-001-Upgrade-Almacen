@@ -2,278 +2,303 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Loan; // Import the Loan model class
-
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Log;
-use App\Models\Product; // Import the Product model class
-use Illuminate\Support\Facades\DB; // Import the DB class
-use Carbon\Carbon; // Import the Carbon class
+use Illuminate\Support\Facades\Http;
+
+use App\Exports\LoansExport; // Add this line to import the LoansExport class
 
 class LoanController extends Controller {
 
-
-    public function index() {
-        $loans = Loan::with(['project', 'product','user'])->latest()->get();
-        return response()->json($loans);
-    }
-
-    public function GetCountMonthLoan() {
-        $loans = Loan::with(['project', 'product','user'])
-            ->whereMonth('created_at', now()->month)
-            ->latest()
-            ->get();
-        return response()->json($loans);
-    }
- 
-    
-      
-    public function PostBetweenLoan(Request $request) {
-        $start_date = Carbon::createFromFormat('d/m/Y', $request->input('start_date'))->startOfDay();
-        $end_date = Carbon::createFromFormat('d/m/Y', $request->input('end_date'))->endOfDay();
-    
-        $loans = Loan::with(['project', 'product', 'user'])
-            ->whereBetween('updated_at', [$start_date, $end_date])
-            ->orderBy('updated_at', 'asc') // Cambia a orden ascendente
-            ->get();
-    
-        return response()->json($loans);
-    }
-    
-
-    public function GetProductLoan() {
-        // Obtener el producto con la mayor cantidad de préstamos (sumando las cantidades)
-        $productWithMostLoan = DB::table('loans')
-            ->select('product_id', DB::raw('SUM(quantity) as total_quantity'))
-            ->groupBy('product_id')
-            ->orderBy('total_quantity', 'desc')
-            ->first();
-
-        // Verificar si se encontró algún producto
-        if ($productWithMostLoan) {
-            $product = Product::find($productWithMostLoan->product_id);
-            return response()->json([
-                'product' => $product,
-                'name' => $product->name,
-                'total_quantity' => number_format($productWithMostLoan->total_quantity, 0, '.', ',')
-            ], 200);
-        } else {
-            return response()->json(['message' => 'No products found'], 404);
+    public function index(Request $request) {
+        if (session('role') === '2') {
+            return redirect()->back()->with('error', 'No tienes permiso para acceder a esta página');
         }
-    }
-
-
-    public function SearchLoan(Request $request) {
-        // Obtener el parámetro de búsqueda desde la solicitud
-        $search = $request->input('search');
     
-        // Crear la consulta base con las relaciones
-        $query = Loan::with(['product', 'project', 'user'])
-            ->leftJoin('projects', 'loans.project_id', '=', 'projects.id')
-            ->leftJoin('products', 'loans.product_id', '=', 'products.id')
-            ->leftJoin('users', 'loans.user_id', '=', 'users.id')
-            ->select('loans.*');
+        // URL base de la API
+        $baseApiUrl = config('app.backend_api');
     
-        // Si el parámetro de búsqueda está presente, filtrar los préstamos
-        if ($search) {
-            $query->selectRaw("
-                (CASE WHEN loans.responsible LIKE ? THEN 1 ELSE 0 END +
-                CASE WHEN loans.quantity LIKE ? THEN 1 ELSE 0 END +
-                CASE WHEN loans.created_at LIKE ? THEN 1 ELSE 0 END +
-                CASE WHEN loans.updated_at LIKE ? THEN 1 ELSE 0 END +
-                CASE WHEN loans.observations LIKE ? THEN 1 ELSE 0 END +
-                CASE WHEN products.name LIKE ? THEN 1 ELSE 0 END +
-                CASE WHEN products.location LIKE ? THEN 1 ELSE 0 END +
-                CASE WHEN users.name LIKE ? THEN 1 ELSE 0 END +
-                CASE WHEN projects.name LIKE ? THEN 1 ELSE 0 END +
-                CASE WHEN loans.product_id LIKE ? THEN 1 ELSE 0 END +
-                CASE WHEN loans.status = ? THEN 1 ELSE 0 END
-                ) as relevance_score",
-                array_merge(array_fill(0, 10, "%{$search}%"), [strtolower($search) === 'producto prestado' ? 1 : (strtolower($search) === 'producto regresado' ? 0 : -1)])
-            )
-            ->having('relevance_score', '>', 0)
-            ->orderBy('relevance_score', 'desc');
+        // URL de la API de préstamos
+        $apiUrl = $baseApiUrl . '/api/loans';
+        $apiSearchUrl = $baseApiUrl . '/api/searchLoan';
+        $apiGetCountMonthLoanUrl = $baseApiUrl . '/api/GetCountMonthLoan';
+        $apiGetFinished = $baseApiUrl . '/api/GetFinished';
+        $apiGetStarted = $baseApiUrl . '/api/GetStarted';
+        $apiGetLoanCountMonthNumberUrl = $baseApiUrl . '/api/GetLoanCountMonthNumber';
+        $apiPostBetweenLoan = $baseApiUrl . '/api/PostBetweenLoan';
+        $searchQuery = $request->input('query');
     
-            $query->where(function ($q) use ($search) {
-                // Convertir el texto de búsqueda a minúsculas para comparación
-                $searchLower = strtolower($search);
+        // Parámetros de paginación
+        $page = $request->input('page', 1); // Página actual, por defecto es 1
+        $perPage = 100; // Número máximo de elementos por página
     
-                // Determinar el valor del status basado en el texto de búsqueda
-                $statusValue = null;
-                if ($searchLower === 'producto prestado') {
-                    $statusValue = 1;
-                } else if ($searchLower === 'producto regresado') {
-                    $statusValue = 0;
+        // Obtener el token de la sesión
+        $token = $request->session()->get('token');
+    
+        // Si hay un término de búsqueda, usar la URL de búsqueda
+        if ($searchQuery) {
+            $apiSearchUrl .= '?search=' . urlencode($searchQuery) . '&page=' . $page . '&per_page=' . $perPage;
+            $response = Http::withToken($token)->get($apiSearchUrl);
+        } else {
+            $apiUrl .= '?page=' . $page . '&per_page=' . $perPage;
+            $response = Http::withToken($token)->get($apiUrl);
+        }
+    
+        // Verifica si la solicitud fue exitosa
+        if ($response->successful()) {
+            // Decodifica la respuesta JSON en un array asociativo
+            $data = $response->json();
+    
+            // Verifica si la clave 'data' está presente en la respuesta
+            if (is_array($data) && array_key_exists('data', $data)) {
+                $loans = $data['data'];
+                $total = $data['total'] ?? 0;
+                $currentPage = $data['current_page'] ?? 1;
+                $lastPage = $data['last_page'] ?? 1;
+            } else {
+                // Asume que toda la respuesta es el conjunto de datos
+                $loans = array_slice($data, ($page - 1) * $perPage, $perPage);
+                $total = count($data);
+                $currentPage = $page;
+                $lastPage = ceil($total / $perPage);
+            }
+    
+            // Obtener el conteo de préstamos del mes actual
+            $monthLoanResponse = Http::withToken($token)->get($apiGetLoanCountMonthNumberUrl);
+            $monthDataNumber = $monthLoanResponse->successful() ? $monthLoanResponse->json() : ['count' => 0];
+    
+            // Si el parámetro 'download' está presente, generar el archivo correspondiente
+            if ($request->has('download')) {
+                $downloadType = $request->input('download');
+    
+                if ($downloadType === 'pdf') {
+                    $htmlContent = view('loans.pdf', compact('loans'))->render();
+                    $htmlFilePath = storage_path('temp/loans_temp_file.html');
+                    file_put_contents($htmlFilePath, $htmlContent);
+    
+                    if (!file_exists($htmlFilePath)) {
+                        return redirect()->back()->with('error', 'Error al generar el archivo HTML');
+                    }
+    
+                    $pdfFilePath = storage_path('temp/Prestamos.pdf');
+                    $command = '"' . env('WKHTMLTOPDF_PATH') . '" --lowquality "file:///' . $htmlFilePath . '" "' . $pdfFilePath . '"';
+    
+                    exec($command, $output, $returnVar);
+    
+                    if ($returnVar === 0) {
+                        return response()->download($pdfFilePath)->deleteFileAfterSend(true);
+                    } else {
+                        return redirect()->back()->with('error', 'Error al generar el PDF');
+                    }
+                } elseif ($downloadType === 'month_pdf') {
+                    $monthResponse = Http::withToken($token)->get($apiGetCountMonthLoanUrl);
+    
+                    if ($monthResponse->successful()) {
+                        $monthData = $monthResponse->json();
+    
+                        $htmlContent = view('loans.month_pdf', compact('monthData'))->render();
+                        $htmlFilePath = storage_path('temp/loans_month_temp_file.html');
+                        file_put_contents($htmlFilePath, $htmlContent);
+    
+                        if (!file_exists($htmlFilePath)) {
+                            return redirect()->back()->with('error', 'Error al generar el archivo HTML');
+                        }
+    
+                        $pdfFilePath = storage_path('temp/Prestamos_Mes.pdf');
+                        $command = '"' . env('WKHTMLTOPDF_PATH') . '" --lowquality "file:///' . $htmlFilePath . '" "' . $pdfFilePath . '"';
+    
+                        exec($command, $output, $returnVar);
+    
+                        if ($returnVar === 0) {
+                            return response()->download($pdfFilePath)->deleteFileAfterSend(true);
+                        } else {
+                            return redirect()->back()->with('error', 'Error al generar el PDF');
+                        }
+                    } else {
+                        return redirect()->back()->with('error', 'Error al obtener los préstamos del mes de la API');
+                    }
+                } elseif ($downloadType === 'finished_pdf') {
+                    $finishedResponse = Http::withToken($token)->get($apiGetFinished);
+    
+                    if ($finishedResponse->successful()) {
+                        $finishedData = $finishedResponse->json();
+    
+                        $htmlContent = view('loans.finished_pdf', compact('finishedData'))->render();
+                        $htmlFilePath = storage_path('temp/loans_finished_temp_file.html');
+                        file_put_contents($htmlFilePath, $htmlContent);
+    
+                        if (!file_exists($htmlFilePath)) {
+                            return redirect()->back()->with('error', 'Error al generar el archivo HTML');
+                        }
+    
+                        $pdfFilePath = storage_path('temp/Prestamos_Finalizados.pdf');
+                        $command = '"' . env('WKHTMLTOPDF_PATH') . '" --lowquality "file:///' . $htmlFilePath . '" "' . $pdfFilePath . '"';
+    
+                        exec($command, $output, $returnVar);
+    
+                        if ($returnVar === 0) {
+                            return response()->download($pdfFilePath)->deleteFileAfterSend(true);
+                        } else {
+                            return redirect()->back()->with('error', 'Error al generar el PDF');
+                        }
+                    } else {
+                        return redirect()->back()->with('error', 'Error al obtener los préstamos finalizados de la API');
+                    }
+                } elseif ($downloadType === 'started_pdf') {
+                    $startedResponse = Http::withToken($token)->get($apiGetStarted);
+    
+                    if ($startedResponse->successful()) {
+                        $startedData = $startedResponse->json();
+    
+                        $htmlContent = view('loans.started_pdf', compact('startedData'))->render();
+                        $htmlFilePath = storage_path('temp/loans_started_temp_file.html');
+                        file_put_contents($htmlFilePath, $htmlContent);
+    
+                        if (!file_exists($htmlFilePath)) {
+                            return redirect()->back()->with('error', 'Error al generar el archivo HTML');
+                        }
+    
+                        $pdfFilePath = storage_path('temp/Prestamos_Iniciados.pdf');
+                        $command = '"' . env('WKHTMLTOPDF_PATH') . '" --lowquality "file:///' . $htmlFilePath . '" "' . $pdfFilePath . '"';
+    
+                        exec($command, $output, $returnVar);
+    
+                        if ($returnVar === 0) {
+                            return response()->download($pdfFilePath)->deleteFileAfterSend(true);
+                        } else {
+                            return redirect()->back()->with('error', 'Error al generar el PDF');
+                        }
+                    } else {
+                        return redirect()->back()->with('error', 'Error al obtener los préstamos iniciados de la API');
+                    }
+                } elseif ($downloadType === 'between_dates_pdf') {
+                    $start_date = $request->input('start_date');
+                    $end_date = $request->input('end_date');
+    
+                    $dateRangeResponse = Http::withToken($token)->post($apiPostBetweenLoan, [
+                        'start_date' => $start_date,
+                        'end_date' => $end_date
+                    ]);
+    
+                    if ($dateRangeResponse->successful()) {
+                        $dateRangeData = $dateRangeResponse->json();
+    
+                        $htmlContent = view('loans.between_dates_pdf', compact('dateRangeData'))->render();
+                        $htmlFilePath = storage_path('temp/loans_between_dates_temp_file.html');
+                        file_put_contents($htmlFilePath, $htmlContent);
+    
+                        if (!file_exists($htmlFilePath)) {
+                            return redirect()->back()->with('error', 'Error al generar el archivo HTML');
+                        }
+    
+                        $pdfFilePath = storage_path('temp/Prestamos_Rango_Fechas.pdf');
+                        $command = '"' . env('WKHTMLTOPDF_PATH') . '" --lowquality "file:///' . $htmlFilePath . '" "' . $pdfFilePath . '"';
+    
+                        exec($command, $output, $returnVar);
+    
+                        if ($returnVar === 0) {
+                            return response()->download($pdfFilePath)->deleteFileAfterSend(true);
+                        } else {
+                            return redirect()->back()->with('error', 'Error al generar el PDF');
+                        }
+                    } else {
+                        return redirect()->back()->with('error', 'Error al obtener los préstamos del rango de fechas de la API');
+                    }
+                } elseif ($downloadType === 'between_dates_excel') {
+                    $start_date = $request->input('start_date');
+                    $end_date = $request->input('end_date');
+    
+                    $dateRangeResponse = Http::withToken($token)->post($apiPostBetweenLoan, [
+                        'start_date' => $start_date,
+                        'end_date' => $end_date
+                    ]);
+    
+                    if ($dateRangeResponse->successful()) {
+                        $dateRangeData = $dateRangeResponse->json();
+    
+                        $filePath = storage_path('app/Prestamos_Rango_Seleccionado.xlsx');
+                        $export = new LoansExport($dateRangeData);
+                        $export->export($filePath);
+    
+                        return response()->download($filePath)->deleteFileAfterSend(true);
+                    } else {
+                        return redirect()->back()->with('error', 'Error al obtener los préstamos del rango de fechas de la API');
+                    }
                 }
+            }
     
-                // Aplicar filtros a la consulta
-                $q->where('loans.responsible', 'like', "%{$search}%")
-                    ->orWhere('loans.quantity', 'like', "%{$search}%")
-                    ->orWhere('loans.created_at', 'like', "%{$search}%")
-                    ->orWhere('loans.updated_at', 'like', "%{$search}%")
-                    ->orWhere('loans.observations', 'like', "%{$search}%")
-                    ->orWhere('products.name', 'like', "%{$search}%")
-                    ->orWhere('users.name', 'like', "%{$search}%")
-                    ->orWhere('projects.name', 'like', "%{$search}%")
-                    ->orWhere('products.location', 'like', "%{$search}%")
-                    ->orWhere('loans.product_id', 'like', "%{$search}%");
+            // Pasa los datos de préstamos y los parámetros de paginación a la vista y renderiza la vista
+            return view('loans.index', compact('loans', 'searchQuery', 'total', 'currentPage', 'lastPage', 'monthDataNumber'));
+        }
     
-                // Si se ha determinado un valor de status, agregarlo a la consulta
-                if ($statusValue !== null) {
-                    $q->orWhere('loans.status', $statusValue);
-                }
-            });
+        // Si la solicitud no fue exitosa, redirige o muestra un mensaje de error
+        return redirect()->back()->with('error', 'Error al obtener los préstamos de la API');
+    }
+    
+    public function edit($id, Request $request) {
+        // URL base de la API
+        $baseApiUrl = config('app.backend_api');
+
+        // URL de la API para obtener un préstamo específico
+        $apiUrl = $baseApiUrl . '/api/loans/' . $id;
+
+        // Obtener el token de la sesión
+        $token = $request->session()->get('token');
+
+        // Realiza una solicitud HTTP GET a la API para obtener los datos del préstamo
+        $response = Http::withToken($token)->get($apiUrl);
+
+        // Verifica si la solicitud fue exitosa
+        if ($response->successful()) {
+            // Decodifica la respuesta JSON en un array asociativo
+            $loan = $response->json();
+
+            // Muestra el formulario de edición con los datos del préstamo
+            return view('loans.edit', compact('loan'));
         } else {
-            // Si no hay parámetro de búsqueda, obtener todos los préstamos
-            $loans = Loan::with(['product', 'project', 'user'])->get();
-            return response()->json($loans);
+            // Manejar errores si la solicitud no fue exitosa
+            return back()->withErrors('Error al obtener los datos del préstamo. Por favor, inténtalo de nuevo más tarde.');
         }
-    
-        // Ejecutar la consulta si hay un parámetro de búsqueda
-        $loans = $query->get();
-    
-        return response()->json($loans);
-    }
-    
-
-    public function getCount() {
-        $count = Loan::where('status', 1)->count();
-        return response()->json(['count' => number_format($count, 0, '.', ',')]);
-    }
-    public function getCountFinish() {
-        $count = Loan::where('status', 0)->count();
-        return response()->json(['count' => number_format($count, 0, '.', ',')]);
-    }
-    
-    public function getCountAll() {
-        $count = Loan::count();
-        return response()->json(['count' => number_format($count, 0, '.', ',')]);
-    }
-
-
-    public function GetFinished() {
-        $loans = Loan::with(['project', 'product'])
-            ->where('status', 0)
-            ->latest()
-            ->get();
-        return response()->json($loans);
-    }
-
-    public function GetStarted() {
-        $loans = Loan::with(['project', 'product'])
-            ->where('status', 1)
-            ->latest()
-            ->get();
-        return response()->json($loans);
-    }
-
-
-// Get the total number of loans of the current month
-public function GetLoanCountMonthNumber() {
-    // Obtener la cantidad total de préstamos del mes actual
-    $loansCount = Loan::whereMonth('created_at', now()->month)->count();
-
-    return response()->json(['count' => $loansCount], 200);
-}
-
-    public function store(Request $request) {
-        $request->validate([
-            'project_id' => 'nullable|exists:projects,id',
-            'product_id' => 'required|exists:products,id',
-            'responsible' => 'required|string|max:100',
-            'quantity' => 'required|integer',
-            'observations' => 'nullable|string',
-            'user_id' => 'required|exists:users,id',
- 
-        ]);
-    
-        // Verificar que observations está presente en la solicitud
-        if ($request->has('observations')) {
-            Log::info('Observations field is present in the request: ' . $request->observations);
-        } else {
-            Log::info('Observations field is not present in the request.');
-        }
-    
-        // Buscar el producto
-        $product = Product::findOrFail($request->product_id);
-    
-        // Verificar si hay suficiente cantidad disponible
-        if ($product->quantity < $request->quantity) {
-            return response()->json(['error' => 'No hay suficiente cantidad disponible. Cantidad disponible: ' . number_format($product->quantity, 0, '.', ',')], 400);
-        }
-    
-        // Deducción de la cantidad en la tabla de productos
-        $product->quantity -= $request->quantity;
-        $product->save();
-    
-        // Crear el préstamo en la tabla de préstamos
-        $loanData = $request->only(['product_id', 'responsible', 'quantity', 'observations', 'project_id', 'user_id']);
-        $loanData['status'] = 1;
-        $loan = Loan::create($loanData);
-    
-        return response()->json($loan, 201);
-    }
-    
-
-
-    public function show($id) {
-        $loan = Loan::with(['product'])->find($id);
-        if (!$loan) {
-            return response()->json(['message' => 'Loan not found'], 404);
-        }
-        return response()->json($loan);
     }
 
     public function update(Request $request, $id) {
-        $request->validate([
-            'product_id' => 'required|exists:products,id',
-            'responsible' => 'required|string|max:100',
-            'quantity' => 'required|integer',
-            'date' => 'required|date'
+        $baseApiUrl = config('app.backend_api');
+        $apiUrl = $baseApiUrl . '/api/comeBackLoan/' . $id;
+        $token = $request->session()->get('token');
+
+        // Incluye las observaciones en la solicitud
+        $response = Http::withToken($token)->put($apiUrl, [
+            'observations' => $request->input('observations')
         ]);
 
-        // Buscar el préstamo por su ID
-        $loan = Loan::findOrFail($id);
-
-        // Buscar el producto
-        $product = Product::findOrFail($request->product_id);
-
-        // Verificar si hay suficiente cantidad disponible
-        if ($product->quantity < $request->quantity) {
-            return response()->json(['error' => 'No hay suficiente cantidad disponible. Cantidad disponible: ' . number_format($product->quantity, 0, '.', ',')], 400);
+        if ($response->successful()) {
+            return $response->json();
+        } else {
+            return response()->json(['error' => 'Error al devolver el préstamo.'], $response->status());
         }
-
-        // Aumentar la cantidad del producto devuelto en el inventario
-        $product->quantity -= $loan->quantity;
-        $product->save();
-
-        // Actualizar el préstamo
-        $loan->update($request->all());
-
-        return response()->json($loan, 200);
     }
 
 
+    public function destroy($id, Request $request) {
+        // URL base de la API
+        $baseApiUrl = config('app.backend_api');
 
-    public function comeBackLoan(Request $request, $id) {
-        try {
-            $loan = Loan::findOrFail($id);
+        // URL de la API para eliminar un préstamo específico
+        $apiUrl = $baseApiUrl . '/api/loans/' . $id;
 
-            if ($loan->status !== 1) {
-                return response()->json(['error' => 'Este préstamo ya ha sido devuelto.'], 400);
-            }
+        // Obtener el token de la sesión
+        $token = $request->session()->get('token');
 
-            $product = Product::findOrFail($loan->product_id);
-            $product->quantity += $loan->quantity;
-            $product->save();
+        // Realizar una solicitud HTTP DELETE a la API para eliminar el préstamo
+        $response = Http::withToken($token)->delete($apiUrl);
 
-            $loan->status = 0;
-            $loan->observations = $request->input('observations'); // Asegúrate de que las observaciones se guardan
-            $loan->save();
-
-            return response()->json(['message' => 'El préstamo ha sido devuelto correctamente.'], 200);
-        } catch (\Exception $e) {
-            return response()->json(['error' => 'Error al procesar la devolución del préstamo.', 'details' => $e->getMessage()], 500);
+        // Verificar si la solicitud fue exitosa
+        if ($response->successful()) {
+            // Redirigir a una página de éxito o mostrar un mensaje de éxito
+            return redirect()->route('loans.index')->with('success', 'Préstamo eliminado exitosamente.');
+        } else {
+            // Manejar errores si la solicitud no fue exitosa
+            $errorMessage = $response->json()['message'] ?? 'Error al eliminar el préstamo. Por favor, inténtalo de nuevo más tarde.';
+            return redirect()->route('loans.index')->with('error', $errorMessage);
         }
     }
 }
